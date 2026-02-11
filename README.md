@@ -1,93 +1,221 @@
-I can't directly push content to your GitHub repository (https://github.com/nwlterry/ocp-logforward-elk) myself, as I'm an AI without access to your accounts or authentication tokens. However, I can give you clear step-by-step instructions to do it yourself.
+Here is a practical guide to setting up **log forwarding** in **OpenShift 4.18**, including filtering, based on the current Red Hat OpenShift Logging implementation (typically Logging 5.8+ for 4.18, using the modern **ClusterLogForwarder** API with Vector collector).
 
-Your repo already exists and is **not empty** — it has a `README.md` from an initial commit (likely created when you made the repo). We'll add the OpenShift 4.18 log-forwarding guide (the content from my previous response) as a new file, for example `openshift-log-forwarding-guide.md` or `README.md` (overwriting/updating the existing one if you prefer).
+The official documentation for OpenShift 4.18 Logging is available here:  
+https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/logging/index
 
-### Recommended Approach: Update README.md or Add a New Markdown File
+Key sections include log collection/forwarding and configuring the ClusterLogForwarder.
 
-1. **On your local machine**, create a folder for this project (if you don't have one already):
+### Prerequisites
+- The **Red Hat OpenShift Logging Operator** must be installed (usually version 5.8 or later for OCP 4.18).
+- A default **ClusterLogging** custom resource (CR) named `instance` usually exists in the `openshift-logging` namespace (even if you're forwarding externally and not using the internal store).
+- You have cluster-admin privileges.
+- Decide on your **output** destination (e.g. LokiStack, external Elasticsearch, CloudWatch, Splunk, Kafka, syslog, etc.).
 
-   ```bash
-   mkdir ocp-logforward-elk
-   cd ocp-logforward-elk
-   ```
+### Step 1: Basic Log Forwarding Setup (No Filtering)
+Create or edit a **ClusterLogForwarder** CR in the `openshift-logging` namespace.
 
-2. **Clone the existing repo** (this is the safest way since it already has content):
+**Example: Forward all logs to an external HTTPS endpoint (e.g. Loki or Elasticsearch)**
 
-   ```bash
-   git clone https://github.com/nwlterry/ocp-logforward-elk.git
-   cd ocp-logforward-elk
-   ```
+```yaml
+apiVersion: logging.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  name: instance
+  namespace: openshift-logging
+spec:
+  outputs:
+    - name: external-loki
+      type: lokistack   # or elasticsearch, cloudwatch, kafka, syslog, etc.
+      url: https://lokistack-ingester.openshift-logging.svc:3100
+      secret:
+        name: lokistack-secret   # contains TLS certs / credentials if needed
 
-   - If you get an authentication error, use a **Personal Access Token** (PAT) instead of password:
-     - Go to GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token (select `repo` scope)
-     - Then use: `git clone https://YOUR_USERNAME:YOUR_PAT@github.com/nwlterry/ocp-logforward-elk.git`
-
-   Alternatively, if you already have the folder locally and want to connect it:
-   ```bash
-   git remote add origin https://github.com/nwlterry/ocp-logforward-elk.git
-   git fetch origin
-   git checkout main   # or master, depending on your default branch
-   ```
-
-3. **Create or edit the file** with the guide content.
-
-   - Option A: Update the existing `README.md` (recommended for a guide repo)
-
-     Open `README.md` in your editor (VS Code, vim, nano, etc.) and **replace its content** with the full guide from my previous response.  
-     Or append it below any existing text.
-
-   - Option B: Add a new file
-
-     ```bash
-     # Use your preferred editor, or echo + redirection
-     cat > openshift-4.18-log-forwarding-guide.md << 'EOF'
-     # Paste the entire previous response here (YAML examples, steps, etc.)
-     EOF
-     ```
-
-     Make sure to copy-paste the full markdown content I gave you earlier.
-
-4. **Stage and commit the changes**:
-
-   ```bash
-   git add .
-   git commit -m "Add OpenShift 4.18 log forwarding setup guide with filtering examples"
-   ```
-
-5. **Push to GitHub**:
-
-   ```bash
-   git push origin main
-   ```
-
-   - If your default branch is `master` instead of `main`, replace `main` with `master`.
-   - If you get a "non-fast-forward" error (unlikely since it's a new file), use `git push --force-with-lease` only if you're sure no one else is collaborating.
-
-### Quick One-Liner Style (if you prefer creating everything fresh)
-
-If you want to **start fresh** (overwrite everything), you can do:
-
-```bash
-mkdir temp-ocp-guide
-cd temp-ocp-guide
-git init
-# Create the file with content (paste the guide)
-cat > README.md << 'EOF'
-# OpenShift 4.18 Log Forwarding Setup Guide with Filtering
-
-(paste the entire previous response here)
-EOF
-
-git add README.md
-git commit -m "Initial commit: OpenShift log forwarding guide"
-git remote add origin https://github.com/nwlterry/ocp-logforward-elk.git
-git branch -M main
-git push -u origin main --force   # Use --force only if you're OK overwriting existing content
+  pipelines:
+    - name: forward-all
+      inputRefs:
+        - application
+        - infrastructure
+        - audit
+      outputRefs:
+        - external-loki
+        # - default   # optional: keep sending to internal store too
 ```
 
-### Tips
-- Use GitHub's web interface as a fallback: Go to the repo → Add file → Create new file → paste the content → Commit directly.
-- Add a proper README header, license (e.g. MIT), or topics like `openshift`, `logging`, `vector`, `elk`, `log-forwarding` via the GitHub UI.
-- If you want to add more (e.g. diagrams, extra YAML files), let me know and I can help expand the content.
+Apply it:
 
-Once pushed, the repo will serve as a nice reference for OpenShift log forwarding to ELK (or other destinations). Let me know if you run into any git errors — I can help troubleshoot!
+```bash
+oc apply -f clf-forward-all.yaml
+```
+
+This forwards **application** (container/pod logs), **infrastructure** (node/journal logs), and **audit** (API server / kube events) logs.
+
+### Step 2: Adding Filtering
+Filtering is very flexible in recent versions. You can filter at different levels:
+
+- **By log source** (namespace, labels, pod name) — most common for application logs
+- **By content** (drop logs matching regex, prune fields)
+- **By severity / facility** (especially for audit logs)
+
+#### Option A: Filter by namespace / labels (application logs)
+
+```yaml
+spec:
+  inputs:
+    - name: my-important-apps
+      application:
+        selector:
+          matchLabels:
+            app.kubernetes.io/part-of: critical-service
+        namespaces:
+          - prod-frontend
+          - prod-backend
+          - monitoring
+
+    - name: noisy-namespace
+      application:
+        namespaces:
+          - dev-sandbox
+
+  pipelines:
+    - name: important-to-loki
+      inputRefs:
+        - my-important-apps
+      outputRefs:
+        - external-loki
+
+    - name: noisy-to-splunk   # example different destination
+      inputRefs:
+        - noisy-namespace
+      outputRefs:
+        - splunk-output
+```
+
+This collects only logs from specific namespaces or pods with certain labels.
+
+You can also **exclude** namespaces:
+
+```yaml
+application:
+  namespaces:
+    - "!logging"
+    - "!openshift-*"
+```
+
+#### Option B: Content-based filtering (drop / prune logs)
+
+Use filters to drop unwanted records or prune fields.
+
+```yaml
+spec:
+  filters:
+    - name: drop-debug-and-info
+      type: drop
+      drop:
+        - condition: '.level == "debug" or .level == "info"'
+
+    - name: drop-health-checks
+      type: drop
+      drop:
+        - condition: '.message | test("healthz|readyz|liveness")'
+
+    - name: prune-sensitive
+      type: prune
+      prune:
+        - in: ['.kubernetes.pod_labels.secret', '.kubernetes.annotations.token']
+
+  pipelines:
+    - name: cleaned-logs
+      inputRefs:
+        - application
+      filterRefs:
+        - drop-debug-and-info
+        - drop-health-checks
+        - prune-sensitive
+      outputRefs:
+        - external-loki
+```
+
+#### Option C: Audit log filtering (very useful to reduce volume)
+
+Audit logs can be extremely verbose. Filter by API group, verb, user, etc.
+
+```yaml
+spec:
+  inputs:
+    - name: filtered-audit
+      audit:
+        filter:
+          - type: drop
+            condition: '.verb == "get" and .user.username == "system:serviceaccount:kube-system:default"'
+          - type: drop
+            condition: '.requestURI | test("/healthz|/metrics")'
+
+  pipelines:
+    - name: audit-lean
+      inputRefs:
+        - filtered-audit
+      outputRefs:
+        - external-loki
+```
+
+### Step 3: Common Full Example (with Filtering)
+
+```yaml
+apiVersion: logging.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  name: instance
+  namespace: openshift-logging
+spec:
+  outputs:
+    - name: loki-prod
+      type: lokistack
+      url: https://lokistack-ingester.openshift-logging.svc:3100
+      secret:
+        name: lokistack-gateway-secret
+
+  inputs:
+    - name: prod-apps-only
+      application:
+        namespaces:
+          - production
+          - finance
+        selector:
+          matchLabels:
+            critical: "true"
+
+  filters:
+    - name: drop-low-level
+      type: drop
+      drop:
+        - condition: '.level in ["trace", "debug"]'
+
+  pipelines:
+    - name: prod-pipeline
+      inputRefs:
+        - prod-apps-only
+        - infrastructure   # nodes, journal
+      filterRefs:
+        - drop-low-level
+      outputRefs:
+        - loki-prod
+
+    - name: audit-pipeline
+      inputRefs:
+        - audit
+      outputRefs:
+        - loki-prod   # or separate secure output
+```
+
+### Step 4: Verify & Troubleshoot
+- Check status: `oc get clusterlogforwarder instance -n openshift-logging -o yaml`
+- Collector pods: `oc get pods -n openshift-logging | grep collector`
+- Logs: `oc logs -n openshift-logging -l app.kubernetes.io/component=collector`
+- Test forwarding: Create a pod in a matching namespace and generate logs (`echo "test log" >&2`).
+
+For the most accurate and up-to-date examples (including new filter syntax or output types), always refer to the **4.18 Logging** docs:
+
+- https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/logging/log-collection-and-forwarding
+- https://docs.redhat.com/en/documentation/openshift_container_platform/4.18/html/logging/configuring-log-forwarding
+
+If you're targeting a specific output (Splunk, CloudWatch, etc.) or have a particular filtering use case, let me know for a more tailored example!
